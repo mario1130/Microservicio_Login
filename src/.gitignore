@@ -1,0 +1,23 @@
+# Dependency directories
+node_modules/
+
+# dotenv environment variables file
+.env
+
+# Logs
+logs/
+*.log
+
+# Build artifacts
+dist/
+build/
+coverage/
+
+# IDE/editor files
+.vscode/
+.idea/
+*.swp
+
+# Temporary files
+*.tmp
+*.temp

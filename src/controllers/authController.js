@@ -1,0 +1,212 @@
+// import { sendPasswordResetEmail } from 'firebase/auth';
+import { collection, addDoc, query, where, orderBy, limit, getDocs, doc, updateDoc, setDoc, getDoc } from 'firebase/firestore';
+import { db } from '../configuration/firebaseConfig.js';
+import User from "../models/userModel.js";
+import admin from 'firebase-admin';
+import Util from '../utils/functions.js'
+
+import { publish } from '../../shared/rabbitmq.js'; // Importar la función de publicación de RabbitMQ
+
+import crypto from 'crypto';
+
+
+export const createUser = async (req, res) => {
+    try {
+        const user = await User.insertUser(req.body);
+        await publish('user_events', { eventType: 'UserCreated', data: user });
+        res.status(201).json(user);
+    } catch (error) {
+        console.error('Error al crear usuario:', error);
+        res.status(500).json({ message: 'Error al crear usuario' });
+    }
+};
+
+export const updateUser = async (req, res) => {
+    try {
+        const user = await User.updateUser(req.body);
+        await publish('user_events', { eventType: 'UserUpdated', data: user });
+        res.status(200).json(user);
+    } catch (error) {
+        console.error('Error al actualizar usuario:', error);
+        res.status(500).json({ message: 'Error al actualizar usuario' });
+    }
+};
+
+
+export const getUserByEmail = async (req, res) => {
+    try {
+        const { mail } = req.validatedData;
+
+        if (!mail) {
+            return res.status(400).json({ message: 'El correo es obligatorio.' });
+        }
+
+        const user = await User.getUserByEmail(mail);
+        if (!user) {
+            return res.status(404).json({ message: 'Usuario no encontrado.' });
+        }
+
+        res.status(200).json(user);
+    } catch (error) {
+        console.error('Error en getUserByEmail:', error.message);
+        res.status(500).json({ message: 'Error interno del servidor.' });
+    }
+};
+
+
+export const login = async (tokenGroup, res) => {
+    try {
+        const { email, uid } = tokenGroup;
+        const user = await admin.auth().getUserByEmail(email);
+        let userPostgre = await User.getUserByEmail(email);
+
+        if (userPostgre == null) {
+            await admin.auth().deleteUser(uid);
+            return res.status(400).json({
+                message: "Ha intentado acceder con un usuario no existente. Contacte con el administrador."
+            });
+        }
+
+        // Generar un nuevo token de sesión único
+        const sessionToken = crypto.randomBytes(32).toString('hex');
+
+        // Verificar si el documento existe en Firestore
+        const userDoc = doc(db, "users", userPostgre.id.toString());
+        const userSnapshot = await getDoc(userDoc);
+
+        if (!userSnapshot.exists()) {
+            // Crear el documento si no existe
+            await setDoc(userDoc, { sessionToken });
+        } else {
+            // Actualizar el token de sesión en Firestore
+            await updateDoc(userDoc, { sessionToken });
+        }
+
+        // Crear un token de Firebase
+        const token = await admin.auth().createCustomToken(uid, { role: 1 });
+
+        // Guardar el historial de inicio de sesión
+        await saveLoginHistory(user);
+
+        res.status(200).json({
+            id: userPostgre.id,
+            token,
+            sessionToken // Enviar el nuevo token de sesión al cliente
+        });
+    } catch (error) {
+        console.error("Error al iniciar sesión:", error);
+        res.status(500).json({
+            message: "Error al iniciar sesión. Contacte con el administrador."
+        });
+    }
+};
+
+
+export const logout = async (req, res) => {
+    try {
+        const { userId } = req.body;
+
+        if (!userId) {
+            return res.status(400).json({ message: "El userId es obligatorio." });
+        }
+
+        // Verificar si el documento existe en Firestore
+        const userDoc = doc(db, "users", userId.toString());
+        const userSnapshot = await getDoc(userDoc);
+
+        if (!userSnapshot.exists()) {
+            console.error(`El documento del usuario ${userId} no existe en Firestore.`);
+            return res.status(404).json({ message: "El usuario no existe en Firestore." });
+        }
+
+
+        console.log("Sesión cerrada correctamente en el backend.");
+        res.status(200).json({ message: "Sesión cerrada correctamente." });
+    } catch (error) {
+        console.error("Error al cerrar sesión:", error);
+        res.status(500).json({ message: "Error al cerrar sesión. Contacte con el administrador." });
+    }
+};
+
+// Función para iniciar sesión con Google
+export const resetPassword = async (req, res) => {
+
+    try {
+
+        const { email } = req.body;
+        if (!email) {
+            return res.status(400).send({ message: 'El correo es obligatorio.' });
+        }
+        // Usa el método de Firebase Authentication para enviar el correo
+        const link = await admin.auth().generatePasswordResetLink(email);
+
+        console.log('Enlace de restablecimiento generado:', link);
+
+        res.status(200).send({ message: "Correo enviado" });
+
+    } catch (error) {
+
+        if (error.code === 'auth/user-not-found') {
+
+            return res.status(404).send({ message: 'No se ha encontrado un usuario con ese correo.' });
+
+        } else {
+
+            return res.status(500).send({ message: 'Ha habido un problema al enviar el correo.' });
+        }
+    }
+}
+
+// Función para guardar el historial de inicio de sesión en Firestore
+export const saveLoginHistory = async (user) => {
+    try {
+        const loginHistoryRef = collection(db, "loginHistory");
+        await addDoc(loginHistoryRef, {
+            userId: user.uid,
+            email: user.email,
+            displayName: user.displayName || "Sin nombre",
+            loginTime: new Date().toISOString(),
+        });
+    } catch (error) {
+        console.error("Error al guardar el historial de inicio de sesión:", error);
+        throw error;
+    }
+}
+
+// Función para guardar el historial de inicio de sesión en Firestore
+//TO DO: HAY QUE CREAR EL INDICE EN FIREBASE!!
+export async function getLastLogin(email) {
+    try {
+        const loginHistoryRef = collection(db, "loginHistory");
+        const q = query(
+            loginHistoryRef,
+            where("email", "==", email),
+            orderBy("loginTime", "desc"),
+            limit(1)
+        );
+
+        const querySnapshot = await getDocs(q);
+
+        if (querySnapshot.empty) {
+            console.log("No se encontró historial de inicio de sesión para este usuario.");
+            return null;
+        }
+
+        return Util.formatToDateOnly(querySnapshot.docs[0].data().loginTime);
+
+    } catch (error) {
+        console.error("Error al obtener el último inicio de sesión:", error);
+        throw error;
+    }
+}
+
+export default {
+    // loginWithEmailPassword,
+    // loginWithGoogle,
+    login,
+    saveLoginHistory,
+    resetPassword,
+    getLastLogin,
+    logout,
+    getUserByEmail
+};
