@@ -13,14 +13,6 @@ const pool = new Pool({
     port: process.env.PG_PORT,
 });
 
-// const pool = new Pool({
-//   user: 'postgres',        // Usuario de PostgreSQL
-//   host: 'localhost',       // Dirección del servidor (local)
-//   database: 'postgres',    // Nombre de la base de datos
-//   password: '', // Contraseña del usuario
-//   port: 5432,              // Puerto de PostgreSQL
-// });
-
 pool.on('connect', () => { });
 
 pool.on('error', (err) => {
